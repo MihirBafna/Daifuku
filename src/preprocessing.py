@@ -7,7 +7,7 @@
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms import ToTensor, Pad
 from tqdm import trange, tqdm
 from scipy.sparse import csr_matrix
@@ -36,7 +36,58 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device_ids = [0, 1]
 
 
-class HiCDataset(Dataset):
+def diagonal_normalize(map):
+    normalized_map = np.zeros(map.shape)
+    for k in range(map.shape[1]):
+        diag = np.diag(map, k=k)
+        diag_sum = np.sum(diag)
+        if diag_sum != 0:
+            normalized_diag = diag/diag_sum
+            normalized_map += np.diagflat(normalized_diag,k=k)
+
+    normalized_map = normalized_map + normalized_map.T - normalized_map * np.eye(map.shape[0])
+    return normalized_map
+
+
+def visualize_contact_map(map, zmax):
+    fig = px.imshow(map.squeeze(),zmax=zmax,color_continuous_scale="darkmint", width=500)
+
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=0, b=0),
+    )
+    return fig    
+
+
+class BulkHiCDataset(Dataset):
+    def __init__(self, config):
+        self.contact_map_path = config["temp_dir"]
+        self.dataset_path = config["data_dir"]
+        self.file_list_path = config["file_list_path"]
+        self.dataset_info = pd.DataFrame(pickle.load(open(self.dataset_path+"/label_info.pickle","rb")))
+        self.chrom_list = config['chrom_list']
+        self.num_cells =  len(self.dataset_info)
+        self.num_chromosomes =  len(self.chrom_list)
+        self.num_cells_pseudobulk = config["num_cells_pseudobulk"]
+        self.is_sparse = True if config["is_sparse"] == "True" else False
+        self.chrom1_size =  np.load(f"{self.contact_map_path}/dense/chr1_pseudobulk.npy").shape[0]
+
+    def __len__(self):
+        return self.num_cells*self.num_chromosomes//self.num_cells_pseudobulk 
+
+    def __getitem__(self, idx):
+        ''' 
+            chrom_idx \in [0,num_chromosomes - 1]
+            cell_idx  \in [0, num_cells - 1]
+        '''
+        chrom_idx = idx // self.num_cells
+        cell_idx = idx - chrom_idx * self.num_cells
+        contact_map = np.load(self.contact_map_path+f"/bulk/chr{chrom_idx+1}_cell{str(cell_idx+1)}_pseudobulk.npy", allow_pickle=True) # load contact maps for chromosome at index chrom_idx
+
+        transform = Pad((0,0,self.chrom1_size - contact_map.shape[0], self.chrom1_size - contact_map.shape[0]))
+        return transform(torch.from_numpy(contact_map))
+
+
+class ScHiCDataset(Dataset):
     def __init__(self, config):
         self.contact_map_path = config["temp_dir"]
         self.dataset_path = config["data_dir"]
@@ -46,8 +97,8 @@ class HiCDataset(Dataset):
         self.num_cells =  len(self.dataset_info)
         self.num_chromosomes =  len(self.chrom_list)
         self.is_sparse = True if config["is_sparse"] == "True" else False
-
-        self.pseudobulk_maps = self.gather_pseudobulk_maps()
+        self.chrom1_size = self.get_map_info()
+        # self.pseudobulk_maps, self.chrom1_size = self.get_map_info()
 
     def __len__(self):
         return self.num_cells*self.num_chromosomes
@@ -65,21 +116,27 @@ class HiCDataset(Dataset):
             contact_path = f"{self.contact_map_path}/dense/chr{chrom_idx+1}_cell{str(cell_idx+1)}.npy"
 
         contact_map = np.load(contact_path, allow_pickle=True) # load contact maps for chromosome at index chrom_idx
-
         if self.is_sparse:
             # return contact_map_sparse
-            contact_map_sparse = spy_sparse2torch_sparse(contact_map)
+            contact_map_sparse = pre.spy_sparse2torch_sparse(contact_map)
             return
         else:
-            return torch.from_numpy(contact_map), self.pseudobulk_maps[chrom_idx]
+            transform = Pad((0,0,self.chrom1_size - contact_map.shape[0], self.chrom1_size - contact_map.shape[0]))
+            return transform(torch.from_numpy(contact_map))
                     
-    def gather_pseudobulk_maps(self):
-        pseudobulk_maps = []
-        for chrom in self.chrom_list:
-            map = np.load(f"{self.contact_map_path}/dense/{chrom}_pseudobulk.npy")
-            map = torch.from_numpy(map).squeeze()
-            pseudobulk_maps.append(map)
-        return pseudobulk_maps
+    def get_map_info(self):
+        # pseudobulk_maps = []
+        # chrom1_mapsize = 0
+        # for i, chrom in enumerate(self.chrom_list):
+        #     map = diagonal_normalize(np.load(f"{self.contact_map_path}/dense/{chrom}_pseudobulk.npy"))
+        #     map = torch.from_numpy(map).squeeze()
+        #     if i==0:
+        #         chrom1_mapsize = map.shape[0]
+        #     # pseudobulk_maps.append(map)
+        return np.load(f"{self.contact_map_path}/dense/chr1_pseudobulk.npy").shape[0]
+    
+    
+
 
 
 def get_config(config_path = "./config.json"):
@@ -326,6 +383,16 @@ def generate_pseudobulk(config):
             map_path = os.path.join(unpack_path, chrom+"_cell"+str(i+1)+"_pseudobulk.npy")
             np.save(map_path,pseudobulk_map)
 
+
+def construct_bulk_dataloaders(config, batch_size):
+	bulk_hic_dataset = BulkHiCDataset(config=config)
+	bulk_hic_dataloader = DataLoader(bulk_hic_dataset, batch_size=batch_size)
+	return bulk_hic_dataloader
+
+def construct_sc_dataloaders(config, batch_size):
+	sc_hic_dataset = ScHiCDataset(config=config)
+	sc_hic_dataloader = DataLoader(sc_hic_dataset, batch_size=batch_size)
+	return sc_hic_dataloader
 
 
 def higashi_preprocess(config):
