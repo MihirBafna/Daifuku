@@ -1,0 +1,6 @@
+{
+    "map_size":196,
+    "hidden_dim":64,
+    "epochs":1000,
+    "sampling_timesteps":250
+}
