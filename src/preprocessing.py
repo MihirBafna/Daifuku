@@ -7,7 +7,7 @@
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 from torchvision.transforms import ToTensor, Pad
 from tqdm import trange, tqdm
 from scipy.sparse import csr_matrix
@@ -384,15 +384,22 @@ def generate_pseudobulk(config):
             np.save(map_path,pseudobulk_map)
 
 
-def construct_bulk_dataloaders(config, batch_size):
-	bulk_hic_dataset = BulkHiCDataset(config=config)
-	bulk_hic_dataloader = DataLoader(bulk_hic_dataset, batch_size=batch_size)
-	return bulk_hic_dataloader
+def construct_dataloaders(config, batch_size, train_size, type="sc"):
+    
+	if type == "sc":
+		hic_dataset = ScHiCDataset(config)
+	elif type== "bulk":
+		hic_dataset = BulkHiCDataset(config)
+	else:
+		raise Exception("Invalid Dataset Type")
 
-def construct_sc_dataloaders(config, batch_size):
-	sc_hic_dataset = ScHiCDataset(config=config)
-	sc_hic_dataloader = DataLoader(sc_hic_dataset, batch_size=batch_size)
-	return sc_hic_dataloader
+	train_size = int(train_size * len(hic_dataset))
+	test_size = len(hic_dataset) - train_size
+	train_dataset, test_dataset = random_split(hic_dataset, [train_size,test_size])
+	train_dataloader = DataLoader(train_dataset, batch_size=batch_size)
+	test_dataloader = DataLoader(test_dataset, batch_size=batch_size)
+
+	return train_dataloader, test_dataloader
 
 
 def higashi_preprocess(config):
