@@ -4,6 +4,7 @@
     "data_dir": "/data/cb/ruochiz/scHiC/m3c_mouse_brain_small/",
     "file_list_path": "/data/cb/mihirb14/projects/Daifuku/data/mc3_mouse_brain_small/filelist.txt",
     "temp_dir": "/data/cb/mihirb14/projects/Daifuku/data/mc3_mouse_brain_small/contactmaps_1M/",
+    "output_dir":"/data/cb/mihirb14/projects/Daifuku/out/",
     "higashi_embed_dir":"/data/cb/ruochiz/Higashi/Temp/m3c_Liu_mousehippo_500k/",
     "genome_reference_path": "/data/cb/mihirb14/projects/Daifuku/data/mc3_mouse_brain_small/mm10.chrom.sizes.txt",
     "cytoband_path": "/home/rzhang/Higashi/cytoBand_mm10.txt",
