@@ -2,10 +2,11 @@
 import argparse
 import os
 import torch
+from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning import Trainer
 
 import preprocessing as pre
-from models.diffusion import Unet, GaussianDiffusion
-
+import models.LightningDiffusion as ld
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Daifuku Help")
@@ -16,26 +17,6 @@ def parse_args():
     parser.add_argument('--debug', action="store_true", help="For debugging purposes only")
     return parser.parse_args()
 
-
-def build_diffusion_model(train_config):
-    
-    score_model = Unet(
-        dim = train_config["hidden_dim"],
-        dim_mults = (1, 2, 4, 8),
-        flash_attn = True,
-        channels=1,
-    )
-    
-    diffusion = GaussianDiffusion(
-        score_model,
-        image_size = train_config["map_size"],          # 196
-        timesteps = train_config["epochs"],           # number of steps 1000
-        sampling_timesteps = train_config["sampling_timesteps"]    # 250 number of sampling timesteps (using ddim for faster inference [see citation for ddim paper])
-    )
-    
-    return diffusion
-    
-    
 
 def main():
     args = parse_args()
@@ -68,6 +49,15 @@ def main():
             train_loader = torch.load(os.path.join(preprocess_output_path,f'train_dataloader_{args.studyname}.pth'))
             test_loader = torch.load(os.path.join(preprocess_output_path,f'test_dataloader_{args.studyname}.pth'))
             
+        daifuku = ld.LightningDiffusion(train_config=train_config)
+        
+        wandb_logger = WandbLogger()
+        trainer = Trainer(
+                    logger=wandb_logger,
+                    max_epochs=train_config["epochs"],
+                )
+        
+        daifuku.fit()
         
 
 
