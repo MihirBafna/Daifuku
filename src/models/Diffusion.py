@@ -27,15 +27,15 @@ from einops.layers.torch import Rearrange
 
 from PIL import Image
 from tqdm.auto import tqdm
-from ema_pytorch import EMA
+# from ema_pytorch import EMA
 
-from accelerate import Accelerator
+# from accelerate import Accelerator
 
-import numpy as np
-from pytorch_fid.inception import InceptionV3
-from pytorch_fid.fid_score import calculate_frechet_distance
+# import numpy as np
+# from pytorch_fid.inception import InceptionV3
+# from pytorch_fid.fid_score import calculate_frechet_distance
 
-from denoising_diffusion_pytorch.version import __version__
+# from denoising_diffusion_pytorch.version import __version__
 
 # constants
 
@@ -157,22 +157,22 @@ class SinusoidalPosEmb(nn.Module):
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
 
-class RandomOrLearnedSinusoidalPosEmb(nn.Module):
-    """ following @crowsonkb 's lead with random (learned optional) sinusoidal pos emb """
-    """ https://github.com/crowsonkb/v-diffusion-jax/blob/master/diffusion/models/danbooru_128.py#L8 """
+# class RandomOrLearnedSinusoidalPosEmb(nn.Module):
+#     """ following @crowsonkb 's lead with random (learned optional) sinusoidal pos emb """
+#     """ https://github.com/crowsonkb/v-diffusion-jax/blob/master/diffusion/models/danbooru_128.py#L8 """
 
-    def __init__(self, dim, is_random = False):
-        super().__init__()
-        assert (dim % 2) == 0
-        half_dim = dim // 2
-        self.weights = nn.Parameter(torch.randn(half_dim), requires_grad = not is_random)
+#     def __init__(self, dim, is_random = False):
+#         super().__init__()
+#         assert (dim % 2) == 0
+#         half_dim = dim // 2
+#         self.weights = nn.Parameter(torch.randn(half_dim), requires_grad = not is_random)
 
-    def forward(self, x):
-        x = rearrange(x, 'b -> b 1')
-        freqs = x * rearrange(self.weights, 'd -> 1 d') * 2 * math.pi
-        fouriered = torch.cat((freqs.sin(), freqs.cos()), dim = -1)
-        fouriered = torch.cat((x, fouriered), dim = -1)
-        return fouriered
+#     def forward(self, x):
+#         x = rearrange(x, 'b -> b 1')
+#         freqs = x * rearrange(self.weights, 'd -> 1 d') * 2 * math.pi
+#         fouriered = torch.cat((freqs.sin(), freqs.cos()), dim = -1)
+#         fouriered = torch.cat((x, fouriered), dim = -1)
+#         return fouriered
 
 # building block modules
 
@@ -274,61 +274,86 @@ class Attention(nn.Module):
         out = rearrange(out, 'b h (x y) d -> b (h d) x y', x = h, y = w)
         return self.to_out(out)
 
+
+class ConvNextBlock(nn.Module):
+    """https://arxiv.org/abs/2201.03545"""
+
+    def __init__(self, dim, dim_out, *, time_emb_dim=None, mult=2, norm=True):
+        super().__init__()
+        self.mlp = (
+            nn.Sequential(nn.GELU(), nn.Linear(time_emb_dim, dim))
+            if exists(time_emb_dim)
+            else None
+        )
+
+        self.ds_conv = nn.Conv2d(dim, dim, 7, padding=3, groups=dim)
+
+        self.net = nn.Sequential(
+            nn.GroupNorm(1, dim) if norm else nn.Identity(),
+            nn.Conv2d(dim, dim_out * mult, 3, padding=1),
+            nn.GELU(),
+            nn.GroupNorm(1, dim_out * mult),
+            nn.Conv2d(dim_out * mult, dim_out, 3, padding=1),
+        )
+
+        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
+
+    def forward(self, x, time_emb=None):
+        h = self.ds_conv(x)
+
+        if exists(self.mlp) and exists(time_emb):
+            assert exists(time_emb), "time embedding must be passed in"
+            condition = self.mlp(time_emb)
+            h = h + rearrange(condition, "b c -> b c 1 1")
+
+        h = self.net(h)
+        return h + self.res_conv(x)
 # model
 
 class Unet(nn.Module):
     def __init__(
         self,
         dim,
-        init_dim = None,
-        out_dim = None,
+        init_dim=None,
+        out_dim=None,
         dim_mults=(1, 2, 4, 8),
-        channels = 3,
-        self_condition = False,
-        resnet_block_groups = 8,
-        learned_variance = False,
-        learned_sinusoidal_cond = False,
-        random_fourier_features = False,
-        learned_sinusoidal_dim = 16
+        channels=3,
+        with_time_emb=True,
+        resnet_block_groups=8,
+        use_convnext=True,
+        convnext_mult=2,
     ):
         super().__init__()
 
+        self.self_condition = None
         # determine dimensions
-
         self.channels = channels
-        self.self_condition = self_condition
-        input_channels = channels * (2 if self_condition else 1)
 
-        init_dim = default(init_dim, dim)
-        self.init_conv = nn.Conv2d(input_channels, init_dim, 7, padding = 3)
+        init_dim = default(init_dim, dim // 3 * 2)
+        self.init_conv = nn.Conv2d(channels, init_dim, 7, padding=3)
 
         dims = [init_dim, *map(lambda m: dim * m, dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
 
-        block_klass = partial(ResnetBlock, groups = resnet_block_groups)
+        if use_convnext:
+            block_klass = partial(ConvNextBlock, mult=convnext_mult)
+        else:
+            block_klass = partial(ResnetBlock, groups=resnet_block_groups)
 
         # time embeddings
-
-        time_dim = dim * 4
-
-        self.random_or_learned_sinusoidal_cond = learned_sinusoidal_cond or random_fourier_features
-
-        if self.random_or_learned_sinusoidal_cond:
-            sinu_pos_emb = RandomOrLearnedSinusoidalPosEmb(learned_sinusoidal_dim, random_fourier_features)
-            fourier_dim = learned_sinusoidal_dim + 1
+        if with_time_emb:
+            time_dim = dim * 4
+            self.time_mlp = nn.Sequential(
+                SinusoidalPosEmb(dim),
+                nn.Linear(dim, time_dim),
+                nn.GELU(),
+                nn.Linear(time_dim, time_dim),
+            )
         else:
-            sinu_pos_emb = SinusoidalPosEmb(dim)
-            fourier_dim = dim
-
-        self.time_mlp = nn.Sequential(
-            sinu_pos_emb,
-            nn.Linear(fourier_dim, time_dim),
-            nn.GELU(),
-            nn.Linear(time_dim, time_dim)
-        )
+            time_dim = None
+            self.time_mlp = None
 
         # layers
-
         self.downs = nn.ModuleList([])
         self.ups = nn.ModuleList([])
         num_resolutions = len(in_out)
@@ -336,75 +361,73 @@ class Unet(nn.Module):
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (num_resolutions - 1)
 
-            self.downs.append(nn.ModuleList([
-                block_klass(dim_in, dim_in, time_emb_dim = time_dim),
-                block_klass(dim_in, dim_in, time_emb_dim = time_dim),
-                Residual(PreNorm(dim_in, LinearAttention(dim_in))),
-                Downsample(dim_in, dim_out) if not is_last else nn.Conv2d(dim_in, dim_out, 3, padding = 1)
-            ]))
+            self.downs.append(
+                nn.ModuleList(
+                    [
+                        block_klass(dim_in, dim_out, time_emb_dim=time_dim),
+                        block_klass(dim_out, dim_out, time_emb_dim=time_dim),
+                        Residual(PreNorm(dim_out, LinearAttention(dim_out))),
+                        Downsample(dim_out) if not is_last else nn.Identity(),
+                    ]
+                )
+            )
 
         mid_dim = dims[-1]
-        self.mid_block1 = block_klass(mid_dim, mid_dim, time_emb_dim = time_dim)
+        self.mid_block1 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim)
         self.mid_attn = Residual(PreNorm(mid_dim, Attention(mid_dim)))
-        self.mid_block2 = block_klass(mid_dim, mid_dim, time_emb_dim = time_dim)
+        self.mid_block2 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim)
 
-        for ind, (dim_in, dim_out) in enumerate(reversed(in_out)):
-            is_last = ind == (len(in_out) - 1)
+        for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
+            is_last = ind >= (num_resolutions - 1)
 
-            self.ups.append(nn.ModuleList([
-                block_klass(dim_out + dim_in, dim_out, time_emb_dim = time_dim),
-                block_klass(dim_out + dim_in, dim_out, time_emb_dim = time_dim),
-                Residual(PreNorm(dim_out, LinearAttention(dim_out))),
-                Upsample(dim_out, dim_in) if not is_last else  nn.Conv2d(dim_out, dim_in, 3, padding = 1)
-            ]))
+            self.ups.append(
+                nn.ModuleList(
+                    [
+                        block_klass(dim_out * 2, dim_in, time_emb_dim=time_dim),
+                        block_klass(dim_in, dim_in, time_emb_dim=time_dim),
+                        Residual(PreNorm(dim_in, LinearAttention(dim_in))),
+                        Upsample(dim_in) if not is_last else nn.Identity(),
+                    ]
+                )
+            )
 
-        default_out_dim = channels * (1 if not learned_variance else 2)
-        self.out_dim = default(out_dim, default_out_dim)
+        out_dim = default(out_dim, channels)
+        self.out_dim = out_dim
+        self.final_conv = nn.Sequential(
+            block_klass(dim, dim), nn.Conv2d(dim, out_dim, 1)
+        )
 
-        self.final_res_block = block_klass(dim * 2, dim, time_emb_dim = time_dim)
-        self.final_conv = nn.Conv2d(dim, self.out_dim, 1)
-
-    def forward(self, x, time, x_self_cond = None):
-        if self.self_condition:
-            x_self_cond = default(x_self_cond, lambda: torch.zeros_like(x))
-            x = torch.cat((x_self_cond, x), dim = 1)
-
+    def forward(self, x, time, self_cond = None):
         x = self.init_conv(x)
-        r = x.clone()
 
-        t = self.time_mlp(time)
+        t = self.time_mlp(time) if exists(self.time_mlp) else None
 
         h = []
 
+        # downsample
         for block1, block2, attn, downsample in self.downs:
             x = block1(x, t)
-            h.append(x)
-
             x = block2(x, t)
             x = attn(x)
             h.append(x)
-
             x = downsample(x)
 
+        # bottleneck
         x = self.mid_block1(x, t)
         x = self.mid_attn(x)
         x = self.mid_block2(x, t)
 
+        # upsample
         for block1, block2, attn, upsample in self.ups:
-            x = torch.cat((x, h.pop()), dim = 1)
+            x = torch.cat((x, h.pop()), dim=1)
             x = block1(x, t)
-
-            x = torch.cat((x, h.pop()), dim = 1)
             x = block2(x, t)
             x = attn(x)
-
             x = upsample(x)
 
-        x = torch.cat((x, r), dim = 1)
-
-        x = self.final_res_block(x, t)
         return self.final_conv(x)
-
+    
+    
 # gaussian diffusion trainer class
 
 def extract(a, t, x_shape):
@@ -467,7 +490,7 @@ class GaussianDiffusion(nn.Module):
     ):
         super().__init__()
         assert not (type(self) == GaussianDiffusion and model.channels != model.out_dim)
-        assert not model.random_or_learned_sinusoidal_cond
+        # assert not model.random_or_learned_sinusoidal_cond
 
         self.model = model
 
@@ -796,248 +819,248 @@ class GaussianDiffusion(nn.Module):
 
 # dataset classes
 
-class Dataset(Dataset):
-    def __init__(
-        self,
-        folder,
-        image_size,
-        exts = ['jpg', 'jpeg', 'png', 'tiff'],
-        augment_horizontal_flip = False,
-        convert_image_to = None
-    ):
-        super().__init__()
-        self.folder = folder
-        self.image_size = image_size
-        self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
-
-        maybe_convert_fn = partial(convert_image_to_fn, convert_image_to) if exists(convert_image_to) else nn.Identity()
-
-        self.transform = T.Compose([
-            T.Lambda(maybe_convert_fn),
-            T.Resize(image_size),
-            T.RandomHorizontalFlip() if augment_horizontal_flip else nn.Identity(),
-            T.CenterCrop(image_size),
-            T.ToTensor()
-        ])
-
-    def __len__(self):
-        return len(self.paths)
-
-    def __getitem__(self, index):
-        path = self.paths[index]
-        img = Image.open(path)
-        return self.transform(img)
-
-# trainer class
-
-class Trainer(object):
-    def __init__(
-        self,
-        diffusion_model,
-        folder,
-        *,
-        train_batch_size = 16,
-        gradient_accumulate_every = 1,
-        augment_horizontal_flip = True,
-        train_lr = 1e-4,
-        train_num_steps = 100000,
-        ema_update_every = 10,
-        ema_decay = 0.995,
-        adam_betas = (0.9, 0.99),
-        save_and_sample_every = 1000,
-        num_samples = 25,
-        results_folder = './results',
-        amp = False,
-        fp16 = False,
-        split_batches = True,
-        convert_image_to = None,
-        calculate_fid = True,
-        inception_block_idx = 2048
-    ):
-        super().__init__()
-
-        # accelerator
-
-        self.accelerator = Accelerator(
-            split_batches = split_batches,
-            mixed_precision = 'fp16' if fp16 else 'no'
-        )
-
-        self.accelerator.native_amp = amp
+# class Dataset(Dataset):
+#     def __init__(
+#         self,
+#         folder,
+#         image_size,
+#         exts = ['jpg', 'jpeg', 'png', 'tiff'],
+#         augment_horizontal_flip = False,
+#         convert_image_to = None
+#     ):
+#         super().__init__()
+#         self.folder = folder
+#         self.image_size = image_size
+#         self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
+
+#         maybe_convert_fn = partial(convert_image_to_fn, convert_image_to) if exists(convert_image_to) else nn.Identity()
+
+#         self.transform = T.Compose([
+#             T.Lambda(maybe_convert_fn),
+#             T.Resize(image_size),
+#             T.RandomHorizontalFlip() if augment_horizontal_flip else nn.Identity(),
+#             T.CenterCrop(image_size),
+#             T.ToTensor()
+#         ])
+
+#     def __len__(self):
+#         return len(self.paths)
+
+#     def __getitem__(self, index):
+#         path = self.paths[index]
+#         img = Image.open(path)
+#         return self.transform(img)
+
+# # trainer class
+
+# class Trainer(object):
+#     def __init__(
+#         self,
+#         diffusion_model,
+#         folder,
+#         *,
+#         train_batch_size = 16,
+#         gradient_accumulate_every = 1,
+#         augment_horizontal_flip = True,
+#         train_lr = 1e-4,
+#         train_num_steps = 100000,
+#         ema_update_every = 10,
+#         ema_decay = 0.995,
+#         adam_betas = (0.9, 0.99),
+#         save_and_sample_every = 1000,
+#         num_samples = 25,
+#         results_folder = './results',
+#         amp = False,
+#         fp16 = False,
+#         split_batches = True,
+#         convert_image_to = None,
+#         calculate_fid = True,
+#         inception_block_idx = 2048
+#     ):
+#         super().__init__()
+
+#         # accelerator
+
+#         self.accelerator = Accelerator(
+#             split_batches = split_batches,
+#             mixed_precision = 'fp16' if fp16 else 'no'
+#         )
+
+#         self.accelerator.native_amp = amp
 
-        # model
-
-        self.model = diffusion_model
-        self.channels = diffusion_model.channels
-
-        # InceptionV3 for fid-score computation
+#         # model
+
+#         self.model = diffusion_model
+#         self.channels = diffusion_model.channels
+
+#         # InceptionV3 for fid-score computation
 
-        self.inception_v3 = None
+#         self.inception_v3 = None
 
-        if calculate_fid:
-            assert inception_block_idx in InceptionV3.BLOCK_INDEX_BY_DIM
-            block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[inception_block_idx]
-            self.inception_v3 = InceptionV3([block_idx])
-            self.inception_v3.to(self.device)
+#         if calculate_fid:
+#             assert inception_block_idx in InceptionV3.BLOCK_INDEX_BY_DIM
+#             block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[inception_block_idx]
+#             self.inception_v3 = InceptionV3([block_idx])
+#             self.inception_v3.to(self.device)
 
-        # sampling and training hyperparameters
+#         # sampling and training hyperparameters
 
-        assert has_int_squareroot(num_samples), 'number of samples must have an integer square root'
-        self.num_samples = num_samples
-        self.save_and_sample_every = save_and_sample_every
+#         assert has_int_squareroot(num_samples), 'number of samples must have an integer square root'
+#         self.num_samples = num_samples
+#         self.save_and_sample_every = save_and_sample_every
 
-        self.batch_size = train_batch_size
-        self.gradient_accumulate_every = gradient_accumulate_every
+#         self.batch_size = train_batch_size
+#         self.gradient_accumulate_every = gradient_accumulate_every
 
-        self.train_num_steps = train_num_steps
-        self.image_size = diffusion_model.image_size
+#         self.train_num_steps = train_num_steps
+#         self.image_size = diffusion_model.image_size
 
-        # dataset and dataloader
+#         # dataset and dataloader
 
-        self.ds = Dataset(folder, self.image_size, augment_horizontal_flip = augment_horizontal_flip, convert_image_to = convert_image_to)
-        dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
+#         self.ds = Dataset(folder, self.image_size, augment_horizontal_flip = augment_horizontal_flip, convert_image_to = convert_image_to)
+#         dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
 
-        dl = self.accelerator.prepare(dl)
-        self.dl = cycle(dl)
+#         dl = self.accelerator.prepare(dl)
+#         self.dl = cycle(dl)
 
-        # optimizer
+#         # optimizer
 
-        self.opt = Adam(diffusion_model.parameters(), lr = train_lr, betas = adam_betas)
+#         self.opt = Adam(diffusion_model.parameters(), lr = train_lr, betas = adam_betas)
 
-        # for logging results in a folder periodically
+#         # for logging results in a folder periodically
 
-        if self.accelerator.is_main_process:
-            self.ema = EMA(diffusion_model, beta = ema_decay, update_every = ema_update_every)
-            self.ema.to(self.device)
+#         if self.accelerator.is_main_process:
+#             self.ema = EMA(diffusion_model, beta = ema_decay, update_every = ema_update_every)
+#             self.ema.to(self.device)
 
-        self.results_folder = Path(results_folder)
-        self.results_folder.mkdir(exist_ok = True)
+#         self.results_folder = Path(results_folder)
+#         self.results_folder.mkdir(exist_ok = True)
 
-        # step counter state
+#         # step counter state
 
-        self.step = 0
+#         self.step = 0
 
-        # prepare model, dataloader, optimizer with accelerator
+#         # prepare model, dataloader, optimizer with accelerator
 
-        self.model, self.opt = self.accelerator.prepare(self.model, self.opt)
+#         self.model, self.opt = self.accelerator.prepare(self.model, self.opt)
 
-    @property
-    def device(self):
-        return self.accelerator.device
+#     @property
+#     def device(self):
+#         return self.accelerator.device
 
-    def save(self, milestone):
-        if not self.accelerator.is_local_main_process:
-            return
+#     def save(self, milestone):
+#         if not self.accelerator.is_local_main_process:
+#             return
 
-        data = {
-            'step': self.step,
-            'model': self.accelerator.get_state_dict(self.model),
-            'opt': self.opt.state_dict(),
-            'ema': self.ema.state_dict(),
-            'scaler': self.accelerator.scaler.state_dict() if exists(self.accelerator.scaler) else None,
-            'version': __version__
-        }
+#         data = {
+#             'step': self.step,
+#             'model': self.accelerator.get_state_dict(self.model),
+#             'opt': self.opt.state_dict(),
+#             'ema': self.ema.state_dict(),
+#             'scaler': self.accelerator.scaler.state_dict() if exists(self.accelerator.scaler) else None,
+#             'version': __version__
+#         }
 
-        torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
+#         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
 
-    def load(self, milestone):
-        accelerator = self.accelerator
-        device = accelerator.device
+#     def load(self, milestone):
+#         accelerator = self.accelerator
+#         device = accelerator.device
 
-        data = torch.load(str(self.results_folder / f'model-{milestone}.pt'), map_location=device)
+#         data = torch.load(str(self.results_folder / f'model-{milestone}.pt'), map_location=device)
 
-        model = self.accelerator.unwrap_model(self.model)
-        model.load_state_dict(data['model'])
+#         model = self.accelerator.unwrap_model(self.model)
+#         model.load_state_dict(data['model'])
 
-        self.step = data['step']
-        self.opt.load_state_dict(data['opt'])
-        if self.accelerator.is_main_process:
-            self.ema.load_state_dict(data["ema"])
+#         self.step = data['step']
+#         self.opt.load_state_dict(data['opt'])
+#         if self.accelerator.is_main_process:
+#             self.ema.load_state_dict(data["ema"])
 
-        if 'version' in data:
-            print(f"loading from version {data['version']}")
+#         if 'version' in data:
+#             print(f"loading from version {data['version']}")
 
-        if exists(self.accelerator.scaler) and exists(data['scaler']):
-            self.accelerator.scaler.load_state_dict(data['scaler'])
+#         if exists(self.accelerator.scaler) and exists(data['scaler']):
+#             self.accelerator.scaler.load_state_dict(data['scaler'])
 
-    @torch.no_grad()
-    def calculate_activation_statistics(self, samples):
-        assert exists(self.inception_v3)
+#     @torch.no_grad()
+#     def calculate_activation_statistics(self, samples):
+#         assert exists(self.inception_v3)
 
-        features = self.inception_v3(samples)[0]
-        features = rearrange(features, '... 1 1 -> ...').cpu().numpy()
+#         features = self.inception_v3(samples)[0]
+#         features = rearrange(features, '... 1 1 -> ...').cpu().numpy()
 
-        mu = np.mean(features, axis = 0)
-        sigma = np.cov(features, rowvar = False)
-        return mu, sigma
+#         mu = np.mean(features, axis = 0)
+#         sigma = np.cov(features, rowvar = False)
+#         return mu, sigma
 
-    def fid_score(self, real_samples, fake_samples):
+#     def fid_score(self, real_samples, fake_samples):
 
-        if self.channels == 1:
-            real_samples, fake_samples = map(lambda t: repeat(t, 'b 1 ... -> b c ...', c = 3), (real_samples, fake_samples))
+#         if self.channels == 1:
+#             real_samples, fake_samples = map(lambda t: repeat(t, 'b 1 ... -> b c ...', c = 3), (real_samples, fake_samples))
 
-        min_batch = min(real_samples.shape[0], fake_samples.shape[0])
-        real_samples, fake_samples = map(lambda t: t[:min_batch], (real_samples, fake_samples))
+#         min_batch = min(real_samples.shape[0], fake_samples.shape[0])
+#         real_samples, fake_samples = map(lambda t: t[:min_batch], (real_samples, fake_samples))
 
-        m1, s1 = self.calculate_activation_statistics(real_samples)
-        m2, s2 = self.calculate_activation_statistics(fake_samples)
+#         m1, s1 = self.calculate_activation_statistics(real_samples)
+#         m2, s2 = self.calculate_activation_statistics(fake_samples)
 
-        fid_value = calculate_frechet_distance(m1, s1, m2, s2)
-        return fid_value
+#         fid_value = calculate_frechet_distance(m1, s1, m2, s2)
+#         return fid_value
 
-    def train(self):
-        accelerator = self.accelerator
-        device = accelerator.device
+#     def train(self):
+#         accelerator = self.accelerator
+#         device = accelerator.device
 
-        with tqdm(initial = self.step, total = self.train_num_steps, disable = not accelerator.is_main_process) as pbar:
+#         with tqdm(initial = self.step, total = self.train_num_steps, disable = not accelerator.is_main_process) as pbar:
 
-            while self.step < self.train_num_steps:
+#             while self.step < self.train_num_steps:
 
-                total_loss = 0.
+#                 total_loss = 0.
 
-                for _ in range(self.gradient_accumulate_every):
-                    data = next(self.dl).to(device)
+#                 for _ in range(self.gradient_accumulate_every):
+#                     data = next(self.dl).to(device)
 
-                    with self.accelerator.autocast():
-                        loss = self.model(data)
-                        loss = loss / self.gradient_accumulate_every
-                        total_loss += loss.item()
+#                     with self.accelerator.autocast():
+#                         loss = self.model(data)
+#                         loss = loss / self.gradient_accumulate_every
+#                         total_loss += loss.item()
 
-                    self.accelerator.backward(loss)
+#                     self.accelerator.backward(loss)
 
-                accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
-                pbar.set_description(f'loss: {total_loss:.4f}')
+#                 accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
+#                 pbar.set_description(f'loss: {total_loss:.4f}')
 
-                accelerator.wait_for_everyone()
+#                 accelerator.wait_for_everyone()
 
-                self.opt.step()
-                self.opt.zero_grad()
+#                 self.opt.step()
+#                 self.opt.zero_grad()
 
-                accelerator.wait_for_everyone()
+#                 accelerator.wait_for_everyone()
 
-                self.step += 1
-                if accelerator.is_main_process:
-                    self.ema.update()
+#                 self.step += 1
+#                 if accelerator.is_main_process:
+#                     self.ema.update()
 
-                    if self.step != 0 and self.step % self.save_and_sample_every == 0:
-                        self.ema.ema_model.eval()
+#                     if self.step != 0 and self.step % self.save_and_sample_every == 0:
+#                         self.ema.ema_model.eval()
 
-                        with torch.no_grad():
-                            milestone = self.step // self.save_and_sample_every
-                            batches = num_to_groups(self.num_samples, self.batch_size)
-                            all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))
+#                         with torch.no_grad():
+#                             milestone = self.step // self.save_and_sample_every
+#                             batches = num_to_groups(self.num_samples, self.batch_size)
+#                             all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))
 
-                        all_images = torch.cat(all_images_list, dim = 0)
+#                         all_images = torch.cat(all_images_list, dim = 0)
 
-                        utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = int(math.sqrt(self.num_samples)))
-                        self.save(milestone)
+#                         utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = int(math.sqrt(self.num_samples)))
+#                         self.save(milestone)
 
-                        # whether to calculate fid
+#                         # whether to calculate fid
 
-                        if exists(self.inception_v3):
-                            fid_score = self.fid_score(real_samples = data, fake_samples = all_images)
-                            accelerator.print(f'fid_score: {fid_score}')
+#                         if exists(self.inception_v3):
+#                             fid_score = self.fid_score(real_samples = data, fake_samples = all_images)
+#                             accelerator.print(f'fid_score: {fid_score}')
 
-                pbar.update(1)
+#                 pbar.update(1)
 
-        accelerator.print('training complete')
+#         accelerator.print('training complete')
