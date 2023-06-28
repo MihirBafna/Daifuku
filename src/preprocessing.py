@@ -15,10 +15,10 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 
 try:
-	get_ipython()
-	from tqdm.notebook import tqdm, trange
+    get_ipython()
+    from tqdm.notebook import tqdm, trange
 except:
-	pass
+    pass
 
 import os 
 import numpy as np
@@ -26,6 +26,7 @@ import pandas as pd
 import math
 import multiprocessing
 import pickle
+from pathlib import Path
 
 cpu_num = multiprocessing.cpu_count()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -34,28 +35,6 @@ torch.set_default_dtype(torch.float32)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device_ids = [0, 1]
-
-
-def diagonal_normalize(map):
-    normalized_map = np.zeros(map.shape)
-    for k in range(map.shape[1]):
-        diag = np.diag(map, k=k)
-        diag_sum = np.sum(diag)
-        if diag_sum != 0:
-            normalized_diag = diag/diag_sum
-            normalized_map += np.diagflat(normalized_diag,k=k)
-
-    normalized_map = normalized_map + normalized_map.T - normalized_map * np.eye(map.shape[0])
-    return normalized_map
-
-
-def visualize_contact_map(map, zmax):
-    fig = px.imshow(map.squeeze(),zmax=zmax,color_continuous_scale="darkmint", width=500)
-
-    fig.update_layout(
-        margin=dict(l=0, r=0, t=0, b=0),
-    )
-    return fig    
 
 
 class BulkHiCDataset(Dataset):
@@ -69,21 +48,35 @@ class BulkHiCDataset(Dataset):
         self.num_chromosomes =  len(self.chrom_list)
         self.num_cells_pseudobulk = config["num_cells_pseudobulk"]
         self.is_sparse = True if config["is_sparse"] == "True" else False
-        self.chrom1_size =  np.load(f"{self.contact_map_path}/dense/chr1_pseudobulk.npy").shape[0]
+        self.map_size = config["train_config"]["map_size"]
+        
+        # Utilized when just selecting one chromosome
+        self.selected_chromosome = config["selected_chrom"]
+
 
     def __len__(self):
-        return self.num_cells*self.num_chromosomes//self.num_cells_pseudobulk 
-
+        
+        if self.selected_chromosome != "all":
+            return len(list(Path(self.contact_map_path+"/bulk/").glob(f"*{self.selected_chromosome}*")))
+        else:
+           return len(os.listdir(self.contact_map_path+"/bulk/"))
+    
+    
     def __getitem__(self, idx):
         ''' 
             chrom_idx \in [0,num_chromosomes - 1]
             cell_idx  \in [0, num_cells - 1]
         '''
-        chrom_idx = idx // self.num_cells
-        cell_idx = idx - chrom_idx * self.num_cells
+        if self.selected_chromosome == "all":
+            chrom_idx = idx // self.num_cells
+            cell_idx = idx - chrom_idx * self.num_cells
+        else:
+            chrom_idx = int(self.selected_chromosome.split("chr")[1]) - 1
+            cell_idx = idx
+            
         contact_map = np.load(self.contact_map_path+f"/bulk/chr{chrom_idx+1}_cell{str(cell_idx+1)}_pseudobulk.npy", allow_pickle=True) # load contact maps for chromosome at index chrom_idx
 
-        transform = Pad((0,0,self.chrom1_size - contact_map.shape[0], self.chrom1_size - contact_map.shape[0]))
+        transform = Pad((0,0,self.map_size - contact_map.shape[0], self.map_size - contact_map.shape[0]))
         return transform(torch.from_numpy(contact_map))
 
 
@@ -97,7 +90,8 @@ class ScHiCDataset(Dataset):
         self.num_cells =  len(self.dataset_info)
         self.num_chromosomes =  len(self.chrom_list)
         self.is_sparse = True if config["is_sparse"] == "True" else False
-        self.chrom1_size = self.get_map_info()
+        self.map_size = config["train_config"]["map_size"]
+        # self.chrom1_size = self.get_map_info()
         # self.pseudobulk_maps, self.chrom1_size = self.get_map_info()
 
     def __len__(self):
@@ -116,12 +110,13 @@ class ScHiCDataset(Dataset):
             contact_path = f"{self.contact_map_path}/dense/chr{chrom_idx+1}_cell{str(cell_idx+1)}.npy"
 
         contact_map = np.load(contact_path, allow_pickle=True) # load contact maps for chromosome at index chrom_idx
+        
         if self.is_sparse:
             # return contact_map_sparse
             contact_map_sparse = pre.spy_sparse2torch_sparse(contact_map)
             return
         else:
-            transform = Pad((0,0,self.chrom1_size - contact_map.shape[0], self.chrom1_size - contact_map.shape[0]))
+            transform = Pad((0,0,self.map_size - contact_map.shape[0], self.map_size - contact_map.shape[0]))
             return transform(torch.from_numpy(contact_map))
                     
     def get_map_info(self):
@@ -134,148 +129,159 @@ class ScHiCDataset(Dataset):
         #         chrom1_mapsize = map.shape[0]
         #     # pseudobulk_maps.append(map)
         return np.load(f"{self.contact_map_path}/dense/chr1_pseudobulk.npy").shape[0]
-    
+                    
     
 
+def diagonal_normalize(map):
+    normalized_map = np.zeros(map.shape)
+    for k in range(map.shape[1]):
+        diag = np.diag(map, k=k)
+        diag_sum = np.sum(diag)
+        if diag_sum != 0:
+            normalized_diag = diag/diag_sum
+            normalized_map += np.diagflat(normalized_diag,k=k)
+
+    normalized_map = normalized_map + normalized_map.T - normalized_map * np.eye(map.shape[0])
+    return normalized_map
 
 
 def get_config(config_path = "./config.json"):
-	c = open(config_path,"r")
-	return json.load(c)
+    c = open(config_path,"r")
+    return json.load(c)
 
 
 def get_free_gpu():
-	os.system('nvidia-smi -q -d Memory |grep -A4 GPU|grep Free > ./tmp')
-	memory_available = [int(x.split()[2]) for x in open('tmp', 'r').readlines()]
-	if len(memory_available) > 0:
-		max_mem = np.max(memory_available)
-		ids = np.where(memory_available == max_mem)[0]
-		chosen_id = int(np.random.choice(ids, 1)[0])
-		print("setting to gpu:%d" % chosen_id)
-		torch.cuda.set_device(chosen_id)
-	else:
-		return
-	
+    os.system('nvidia-smi -q -d Memory |grep -A4 GPU|grep Free > ./tmp')
+    memory_available = [int(x.split()[2]) for x in open('tmp', 'r').readlines()]
+    if len(memory_available) > 0:
+        max_mem = np.max(memory_available)
+        ids = np.where(memory_available == max_mem)[0]
+        chosen_id = int(np.random.choice(ids, 1)[0])
+        print("setting to gpu:%d" % chosen_id)
+        torch.cuda.set_device(chosen_id)
+    else:
+        return
+    
 
 def create_dir(config):
-	temp_dir = config['temp_dir']
-	if not os.path.exists(temp_dir):
-		os.mkdir(temp_dir)
-	
-	raw_dir = os.path.join(temp_dir, "raw")
-	if not os.path.exists(raw_dir):
-		os.mkdir(raw_dir)
+    temp_dir = config['temp_dir']
+    if not os.path.exists(temp_dir):
+        os.mkdir(temp_dir)
+    
+    raw_dir = os.path.join(temp_dir, "raw")
+    if not os.path.exists(raw_dir):
+        os.mkdir(raw_dir)
   
-	bulk_dir = os.path.join(temp_dir, "bulk")
-	if not os.path.exists(bulk_dir):
-		os.mkdir(bulk_dir)
-	
-	
-	# rw_dir = os.path.join(temp_dir, "rw")
-	# if not os.path.exists(rw_dir):
-	# 	os.mkdir(rw_dir)
+    bulk_dir = os.path.join(temp_dir, "bulk")
+    if not os.path.exists(bulk_dir):
+        os.mkdir(bulk_dir)
+    
+    
+    # rw_dir = os.path.join(temp_dir, "rw")
+    # if not os.path.exists(rw_dir):
+    # 	os.mkdir(rw_dir)
 
-	# embed_dir = os.path.join(temp_dir, "embed")
-	# if not os.path.exists(embed_dir):
-	# 	os.mkdir(embed_dir)
-	
+    # embed_dir = os.path.join(temp_dir, "embed")
+    # if not os.path.exists(embed_dir):
+    # 	os.mkdir(embed_dir)
+    
  
 def spy_sparse2torch_sparse(data):
-	"""
-	:param data: a scipy sparse csr matrix
-	:return: a sparse torch tensor
-	"""
-	samples=data.shape[0]
-	features=data.shape[1]
-	values=data.data
-	coo_data=data.tocoo()
-	indices=torch.LongTensor(np.array([coo_data.row,coo_data.col]))
-	t=torch.sparse.FloatTensor(indices,torch.from_numpy(values).float(),[samples,features])
-	return t
+    """
+    :param data: a scipy sparse csr matrix
+    :return: a sparse torch tensor
+    """
+    samples=data.shape[0]
+    features=data.shape[1]
+    values=data.data
+    coo_data=data.tocoo()
+    indices=torch.LongTensor(np.array([coo_data.row,coo_data.col]))
+    t=torch.sparse.FloatTensor(indices,torch.from_numpy(values).float(),[samples,features])
+    return t
 
 
 # Generate a indexing table of start and end id of each chromosome
 def generate_chrom_start_end(config):
-	# fetch info from config
-	genome_reference_path = config['genome_reference_path']
-	chrom_list = config['chrom_list']
-	res = config['resolution']
-	temp_dir = config['temp_dir']
-	
-	print ("generating start/end dict for chromosome")
-	chrom_size = pd.read_table(genome_reference_path, sep="\t", header=None)
-	chrom_size.columns = ['chrom', 'size']
-	# build a list that stores the start and end of each chromosome (unit of the number of bins)
-	chrom_start_end = np.zeros((len(chrom_list), 2), dtype='int')
-	for i, chrom in enumerate(chrom_list):
-		size = chrom_size[chrom_size['chrom'] == chrom]
-		size = size['size'][size.index[0]]
-		n_bin = int(math.ceil(size / res))
-		chrom_start_end[i, 1] = chrom_start_end[i, 0] + n_bin
-		if i + 1 < len(chrom_list):
-			chrom_start_end[i + 1, 0] = chrom_start_end[i, 1]
-	
-	# print("chrom_start_end", chrom_start_end)
-	np.save(os.path.join(temp_dir, "chrom_start_end.npy"), chrom_start_end)
-	
-	
+    # fetch info from config
+    genome_reference_path = config['genome_reference_path']
+    chrom_list = config['chrom_list']
+    res = config['resolution']
+    temp_dir = config['temp_dir']
+    
+    print ("generating start/end dict for chromosome")
+    chrom_size = pd.read_table(genome_reference_path, sep="\t", header=None)
+    chrom_size.columns = ['chrom', 'size']
+    # build a list that stores the start and end of each chromosome (unit of the number of bins)
+    chrom_start_end = np.zeros((len(chrom_list), 2), dtype='int')
+    for i, chrom in enumerate(chrom_list):
+        size = chrom_size[chrom_size['chrom'] == chrom]
+        size = size['size'][size.index[0]]
+        n_bin = int(math.ceil(size / res))
+        chrom_start_end[i, 1] = chrom_start_end[i, 0] + n_bin
+        if i + 1 < len(chrom_list):
+            chrom_start_end[i + 1, 0] = chrom_start_end[i, 1]
+    
+    # print("chrom_start_end", chrom_start_end)
+    np.save(os.path.join(temp_dir, "chrom_start_end.npy"), chrom_start_end)
+    
+    
 def data2mtx(config, file, chrom_start_end, verbose, cell_id):
-	if "header_included" in config:
-		if config['header_included']:
-			tab = pd.read_table(file, sep="\t")
-		else:
-			tab = pd.read_table(file, sep="\t", header=None)
-			tab.columns = config['contact_header']
-	else:
-		tab = pd.read_table(file, sep="\t", header=None)
-		tab.columns = config['contact_header']
-	if 'count' not in tab.columns:
-		tab['count'] = 1
-	
-	if 'downsample' in config:
-		downsample = config['downsample']
-	else:
-		downsample = 1.0
-		
-	data = tab
-	# fetch info from config
-	res = config['resolution']
-	chrom_list = config['chrom_list']
-	
-	data = data[(data['chrom1'] == data['chrom2']) & (np.abs(data['pos2'] - data['pos1']) >= 2500)]
-	
-	pos1 = np.array(data['pos1'])
-	pos2 = np.array(data['pos2'])
-	bin1 = np.floor(pos1 / res).astype('int')
-	bin2 = np.floor(pos2 / res).astype('int')
-	
-	chrom1, chrom2 = np.array(data['chrom1'].values), np.array(data['chrom2'].values)
-	count = np.array(data['count'].values)
-	
-	if downsample < 1:
-		# print ("downsample at", downsample)
-		index = np.random.permutation(len(data))[:int(downsample * len(data))]
-		count = count[index]
-		chrom1 = chrom1[index]
-		bin1 = bin1[index]
-		bin2 = bin2[index]
-		
-	del data
-	
-	m1_list = []
-	for i, chrom in enumerate(chrom_list):
-		mask = (chrom1 == chrom)
-		size = chrom_start_end[i, 1] - chrom_start_end[i, 0]
-		temp_weight2 = count[mask]
-		m1 = csr_matrix((temp_weight2, (bin1[mask], bin2[mask])), shape=(size, size), dtype='float32')
-		m1 = m1 + m1.T
-		m1_list.append(m1)
-		count = count[~mask]
-		bin1 = bin1[~mask]
-		bin2 = bin2[~mask]
-		chrom1 = chrom1[~mask]
-	
-	return m1_list, cell_id
+    if "header_included" in config:
+        if config['header_included']:
+            tab = pd.read_table(file, sep="\t")
+        else:
+            tab = pd.read_table(file, sep="\t", header=None)
+            tab.columns = config['contact_header']
+    else:
+        tab = pd.read_table(file, sep="\t", header=None)
+        tab.columns = config['contact_header']
+    if 'count' not in tab.columns:
+        tab['count'] = 1
+    
+    if 'downsample' in config:
+        downsample = config['downsample']
+    else:
+        downsample = 1.0
+        
+    data = tab
+    # fetch info from config
+    res = config['resolution']
+    chrom_list = config['chrom_list']
+    
+    data = data[(data['chrom1'] == data['chrom2']) & (np.abs(data['pos2'] - data['pos1']) >= 2500)]
+    
+    pos1 = np.array(data['pos1'])
+    pos2 = np.array(data['pos2'])
+    bin1 = np.floor(pos1 / res).astype('int')
+    bin2 = np.floor(pos2 / res).astype('int')
+    
+    chrom1, chrom2 = np.array(data['chrom1'].values), np.array(data['chrom2'].values)
+    count = np.array(data['count'].values)
+    
+    if downsample < 1:
+        # print ("downsample at", downsample)
+        index = np.random.permutation(len(data))[:int(downsample * len(data))]
+        count = count[index]
+        chrom1 = chrom1[index]
+        bin1 = bin1[index]
+        bin2 = bin2[index]
+        
+    del data
+    
+    m1_list = []
+    for i, chrom in enumerate(chrom_list):
+        mask = (chrom1 == chrom)
+        size = chrom_start_end[i, 1] - chrom_start_end[i, 0]
+        temp_weight2 = count[mask]
+        m1 = csr_matrix((temp_weight2, (bin1[mask], bin2[mask])), shape=(size, size), dtype='float32')
+        m1 = m1 + m1.T
+        m1_list.append(m1)
+        count = count[~mask]
+        bin1 = bin1[~mask]
+        bin2 = bin2[~mask]
+        chrom1 = chrom1[~mask]
+    
+    return m1_list, cell_id
 
 
 
@@ -284,48 +290,48 @@ def data2mtx(config, file, chrom_start_end, verbose, cell_id):
 # Extra the data.txt table
 # Memory consumption re-optimize
 def extract_table(config):
-	# fetch info from config
-	data_dir = config['data_dir']
-	temp_dir = config['temp_dir']
-	chrom_list = config['chrom_list']
-	file_list_path = config['file_list_path']
-	if 'input_format' in config:
-		input_format = config['input_format']
-	else:
-		input_format = 'higashi_v2'
-	
-	chrom_start_end = np.load(os.path.join(temp_dir, "chrom_start_end.npy"))
-	if input_format == 'higashi_v1':
-		print ("Sorry no higashi_v1")
-		raise EOFError
-			
-	elif input_format == 'higashi_v2':
-		print ("extracting from filelist.txt")
-		with open(os.path.join(file_list_path), "r") as f:
-			lines = f.readlines()
-			filelist = [line.strip() for line in lines]
-		bar = trange(len(filelist))
-		mtx_all_list = [[0]*len(filelist) for i in range(len(chrom_list))]
-		p_list = []
-		pool = ProcessPoolExecutor(max_workers=cpu_num)
-		for cell_id, file in enumerate(filelist):
-			p_list.append(pool.submit(data2mtx, config, file, chrom_start_end, False, cell_id))
-		
-		
-		for p in as_completed(p_list):
-			mtx_list, cell_id = p.result()
-			for i in range(len(chrom_list)):
-				mtx_all_list[i][cell_id] = mtx_list[i]
-			bar.update(1)
-		bar.close()
-		pool.shutdown(wait=True)
-		for i in range(len(chrom_list)):
-			np.save(os.path.join(temp_dir, "raw", "%s_sparse_adj.npy" % chrom_list[i]), mtx_all_list[i], allow_pickle=True)
-		
-	else:
-		print ("invalid input format")
-		raise EOFError
-	
+    # fetch info from config
+    data_dir = config['data_dir']
+    temp_dir = config['temp_dir']
+    chrom_list = config['chrom_list']
+    file_list_path = config['file_list_path']
+    if 'input_format' in config:
+        input_format = config['input_format']
+    else:
+        input_format = 'higashi_v2'
+    
+    chrom_start_end = np.load(os.path.join(temp_dir, "chrom_start_end.npy"))
+    if input_format == 'higashi_v1':
+        print ("Sorry no higashi_v1")
+        raise EOFError
+            
+    elif input_format == 'higashi_v2':
+        print ("extracting from filelist.txt")
+        with open(os.path.join(file_list_path), "r") as f:
+            lines = f.readlines()
+            filelist = [line.strip() for line in lines]
+        bar = trange(len(filelist))
+        mtx_all_list = [[0]*len(filelist) for i in range(len(chrom_list))]
+        p_list = []
+        pool = ProcessPoolExecutor(max_workers=cpu_num)
+        for cell_id, file in enumerate(filelist):
+            p_list.append(pool.submit(data2mtx, config, file, chrom_start_end, False, cell_id))
+        
+        
+        for p in as_completed(p_list):
+            mtx_list, cell_id = p.result()
+            for i in range(len(chrom_list)):
+                mtx_all_list[i][cell_id] = mtx_list[i]
+            bar.update(1)
+        bar.close()
+        pool.shutdown(wait=True)
+        for i in range(len(chrom_list)):
+            np.save(os.path.join(temp_dir, "raw", "%s_sparse_adj.npy" % chrom_list[i]), mtx_all_list[i], allow_pickle=True)
+        
+    else:
+        print ("invalid input format")
+        raise EOFError
+    
  
 def unpack_contactmaps(config):
     '''
@@ -353,7 +359,7 @@ def unpack_contactmaps(config):
                 np.save(map_path,scipy_contact_map)
             else:
                 np.save(map_path,contact_map_dense)
-			
+            
    
 def get_knn(x, k):
     from sklearn.neighbors import KDTree
@@ -384,27 +390,29 @@ def generate_pseudobulk(config):
             np.save(map_path,pseudobulk_map)
 
 
-def construct_dataloaders(config, batch_size, train_size, type="sc"):
+def construct_dataloaders(config):
     
-	if type == "sc":
-		hic_dataset = ScHiCDataset(config)
-	elif type== "bulk":
-		hic_dataset = BulkHiCDataset(config)
-	else:
-		raise Exception("Invalid Dataset Type")
-
-	train_size = int(train_size * len(hic_dataset))
-	test_size = len(hic_dataset) - train_size
-	train_dataset, test_dataset = random_split(hic_dataset, [train_size,test_size])
-	train_dataloader = DataLoader(train_dataset, batch_size=batch_size)
-	test_dataloader = DataLoader(test_dataset, batch_size=batch_size)
-
-	return train_dataloader, test_dataloader
+    batch_size = config["train_config"]["batch_size"]
+    train_size = config["train_config"]["train_size"]
+    type = config["train_config"]["type"]
+    if type == "sc":
+        hic_dataset = ScHiCDataset(config)
+    elif type== "bulk":
+        hic_dataset = BulkHiCDataset(config)
+    else:
+        raise Exception("Invalid Dataset Type")
+    
+    train_size = int(train_size * len(hic_dataset))
+    test_size = len(hic_dataset) - train_size
+    train_dataset, test_dataset = random_split(hic_dataset, [train_size,test_size])
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size)
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size)
+    return train_dataloader, test_dataloader
 
 
 def higashi_preprocess(config):
-	create_dir(config)
-	generate_chrom_start_end(config)
-	extract_table(config)
-	unpack_contactmaps(config)
-	generate_pseudobulk(config)
+    create_dir(config)
+    generate_chrom_start_end(config)
+    extract_table(config)
+    unpack_contactmaps(config)
+    generate_pseudobulk(config)

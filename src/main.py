@@ -7,6 +7,8 @@ from pytorch_lightning import Trainer
 
 import preprocessing as pre
 import models.LightningDiffusion as ld
+import models.SimpleDiffusion as sd
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Daifuku Help")
@@ -23,9 +25,10 @@ def main():
     config = pre.get_config(args.config)
     train_config = pre.get_config(args.train_config)
 
+    config["train_config"] = train_config
     
     preprocess_output_path = os.path.join(config["output_dir"], "preprocessed")
-    training_output_path = os.path.join(config["output_dir"], "train")
+    training_output_path = os.path.join(config["output_dir"], "trained")
     
     if "preprocess" in args.mode:
         print("\n#------------------------------ Preprocessing ----------------------------#\n")
@@ -36,7 +39,7 @@ def main():
         if not args.debug:
             pre.higashi_preprocess(config)
         
-        train_loader, test_loader = pre.construct_dataloaders(config=config, batch_size=64, train_size=0.8, type="bulk")
+        train_loader, test_loader = pre.construct_dataloaders(config=config)
         
         torch.save(train_loader, os.path.join(preprocess_output_path,f'train_dataloader_{args.studyname}.pth'))
         torch.save(test_loader, os.path.join(preprocess_output_path,f'test_dataloader_{args.studyname}.pth'))
@@ -51,14 +54,37 @@ def main():
             
         daifuku = ld.LightningDiffusion(train_config=train_config)
         
-        wandb_logger = WandbLogger()
+        wandb_logger = WandbLogger(project="Daifuku")
         trainer = Trainer(
+                    # devices=1,
                     logger=wandb_logger,
                     max_epochs=train_config["epochs"],
+                    accelerator="gpu"
                 )
         
-        daifuku.fit()
-        
+        trainer.fit(daifuku, train_loader, test_loader)
+        trainer.save_checkpoint(os.path.join(training_output_path,f'daifuku_{args.studyname}_{train_config["epochs"]}epochs.ckpt'))
+
+
+        # from torch.optim import Adam
+        # import wandb
+        # model = sd.SimpleUnet()
+        # device = "cuda" if torch.cuda.is_available() else "cpu"
+        # model.to(device)
+        # optimizer = Adam(model.parameters(), lr=0.001)
+        # epochs = 100 # Try more!
+        # T = 100
+
+        # for epoch in range(epochs):
+        #     for step, batch in enumerate(train_loader):
+        #         print(batch.shape)
+        #         optimizer.zero_grad()
+
+        #         t = torch.randint(0, T, (train_config["batch_size"],), device=device).long()
+        #         loss = sd.get_loss(model, batch, t, device=device)
+        #         loss.backward()
+        #         optimizer.step()
+                
 
 
 if __name__ == "__main__":
