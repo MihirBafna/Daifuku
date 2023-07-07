@@ -2,6 +2,7 @@
 import argparse
 import os
 import torch
+import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning import Trainer
 
@@ -48,6 +49,8 @@ def main():
     if "train" in args.mode:
         print("\n#-------------------------------- Training -------------------------------#\n")
         
+        pl.seed_everything(1)
+
         if not "preprocess" in args.mode:
             train_loader = torch.load(os.path.join(preprocess_output_path,f'train_dataloader_{args.studyname}.pth'))
             test_loader = torch.load(os.path.join(preprocess_output_path,f'test_dataloader_{args.studyname}.pth'))
@@ -56,10 +59,10 @@ def main():
         
         wandb_logger = WandbLogger(project="Daifuku")
         trainer = Trainer(
-                    # devices=1,
+                    # devices=train_config["num_devices"],
                     logger=wandb_logger,
                     max_epochs=train_config["epochs"],
-                    accelerator="gpu"
+                    accelerator="cpu"
                 )
         
         trainer.fit(daifuku, train_loader, test_loader)

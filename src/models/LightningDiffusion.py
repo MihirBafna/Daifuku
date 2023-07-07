@@ -6,6 +6,7 @@
 
 import torch
 import pytorch_lightning as pl
+from pytorch_lightning.callbacks import Callback
 import wandb
 from .Diffusion import Unet, GaussianDiffusion
 
@@ -42,11 +43,18 @@ class LightningDiffusion(pl.LightningModule):
     
     def training_step(self, train_batch, batch_idx):
         _, loss = self.diffusion_model(train_batch.unsqueeze(1))
-        self.log("train_loss",loss.item(), on_step=True, on_epoch=True)
+        self.log("train_loss",loss.detach(), on_step=True, on_epoch=True)
         return loss
     
     def validation_step(self, val_batch, batch_idx):
         _, loss = self.diffusion_model(val_batch.unsqueeze(1))
-        self.log("val_loss",loss.item(), on_step=True, on_epoch=True)
+        
+        self.log("val_loss",loss.detach(), on_step=True, on_epoch=True)
         
         
+# class LogSampleContactMaps(Callback):
+    
+#      def on_validation_batch_end(
+#         self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+#         """Called when the validation batch ends."""
+ 
