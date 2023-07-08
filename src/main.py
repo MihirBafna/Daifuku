@@ -59,10 +59,10 @@ def main():
         
         wandb_logger = WandbLogger(project="Daifuku")
         trainer = Trainer(
-                    # devices=train_config["num_devices"],
+                    devices=train_config["num_devices"],
                     logger=wandb_logger,
                     max_epochs=train_config["epochs"],
-                    accelerator="cpu"
+                    accelerator=train_config["accelerator"]
                 )
         
         trainer.fit(daifuku, train_loader, test_loader)

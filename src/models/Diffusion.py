@@ -479,7 +479,7 @@ class GaussianDiffusion(nn.Module):
         image_size,
         timesteps = 1000,
         sampling_timesteps = None,
-        objective = 'pred_noise',
+        objective = 'pred_x0',
         beta_schedule = 'sigmoid',
         schedule_fn_kwargs = dict(),
         ddim_sampling_eta = 0.,

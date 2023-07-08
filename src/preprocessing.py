@@ -82,7 +82,7 @@ class BulkHiCDataset(Dataset):
             
         transform = Pad((0,0,self.map_size - contact_map.shape[0], self.map_size - contact_map.shape[0]))
         contact_map = transform(torch.from_numpy(contact_map))
-        print(contact_map.size, contact_map.dtype)
+        # print(contact_map.size, contact_map.dtype)
         return contact_map
  
 

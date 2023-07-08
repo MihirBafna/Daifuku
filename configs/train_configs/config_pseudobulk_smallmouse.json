@@ -8,6 +8,8 @@
     "sampling_timesteps":250,
     "learning_rate":1e-5,
     "num_devices":5,
-    "normalization":"diagonal",
+    "accelerator":"gpu",
+    "normalization":"none",
+    "prediction_type":"pred_x0",
     "type":"bulk"
 }
