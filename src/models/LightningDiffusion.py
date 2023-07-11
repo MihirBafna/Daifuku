@@ -19,13 +19,14 @@ class LightningDiffusion(pl.LightningModule):
         self.train_config = train_config
         
         self.score_model = Unet(
-            dim = train_config["map_size"],
+            dim = train_config["hidden_dim"],
             dim_mults=(1, 2, 4, 8),
-            channels=1
+            channels=1,
         )
         
         self.diffusion_model = GaussianDiffusion(
             self.score_model,
+            auto_normalize = False,
             objective=train_config["prediction_type"],
             image_size = train_config["map_size"],          # 200
             timesteps = train_config["timesteps"],           # number of steps 1000
@@ -39,8 +40,8 @@ class LightningDiffusion(pl.LightningModule):
     def forward(self, x):
         return self.diffusion_model(x)
         
-    def sample(self, batch_size):
-        return self.diffusion_model.sample(batch_size=batch_size)
+    def sample(self, batch_size, input_image=None, return_all_timesteps=True):
+        return self.diffusion_model.sample(batch_size=batch_size, input_image=input_image, return_all_timesteps=return_all_timesteps)
     
     def training_step(self, train_batch, batch_idx):
         out, loss = self.diffusion_model(train_batch.unsqueeze(1))

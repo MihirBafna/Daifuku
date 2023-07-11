@@ -79,6 +79,10 @@ class BulkHiCDataset(Dataset):
 
         if self.normalize == "diagonal":
             contact_map = diagonal_normalize(contact_map)
+        
+        if self.normalize == "mean":
+            contact_map = contact_map/torch.mean(contact_map)
+
             
         transform = Pad((0,0,self.map_size - contact_map.shape[0], self.map_size - contact_map.shape[0]))
         contact_map = transform(torch.from_numpy(contact_map))

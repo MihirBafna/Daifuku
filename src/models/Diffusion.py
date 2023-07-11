@@ -471,6 +471,8 @@ def sigmoid_beta_schedule(timesteps, start = -3, end = 3, tau = 1, clamp_min = 1
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
     return torch.clip(betas, 0, 0.999)
 
+
+
 class GaussianDiffusion(nn.Module):
     def __init__(
         self,
@@ -619,6 +621,7 @@ class GaussianDiffusion(nn.Module):
             extract(self.posterior_mean_coef1, t, x_t.shape) * x_start +
             extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
         )
+        # print ('mean_weight',extract(self.posterior_mean_coef1, t, x_t.shape),extract(self.posterior_mean_coef2, t, x_t.shape))
         posterior_variance = extract(self.posterior_variance, t, x_t.shape)
         posterior_log_variance_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
@@ -665,6 +668,7 @@ class GaussianDiffusion(nn.Module):
         model_mean, _, model_log_variance, x_start = self.p_mean_variance(x = x, t = batched_times, x_self_cond = x_self_cond, clip_denoised = True)
         noise = torch.randn_like(x) if t > 0 else 0. # no noise if t == 0
         pred_img = model_mean + (0.5 * model_log_variance).exp() * noise
+        # print('mean.var', model_mean, model_log_variance)
         return pred_img, x_start
 
     @torch.no_grad()
@@ -673,6 +677,7 @@ class GaussianDiffusion(nn.Module):
 
         img = torch.randn(shape, device = device)
         imgs = [img]
+        starts = []
 
         x_start = None
 
@@ -680,11 +685,32 @@ class GaussianDiffusion(nn.Module):
             self_cond = x_start if self.self_condition else None
             img, x_start = self.p_sample(img, t, self_cond)
             imgs.append(img)
-
+            starts.append(x_start)
+            
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
 
         ret = self.unnormalize(ret)
+        # return ret, self.unnormalize(torch.stack(starts,dim=1)), torch.stack(starts,dim=1)
         return ret
+    
+    # def p_sample_loop_from_starting_img(self, img, return_all_timesteps = False):
+    #     batch, device = img.shape[0], self.device
+
+    #     img = img
+    #     imgs = [img]
+
+    #     x_start = None
+
+    #     for t in tqdm(reversed(range(0, self.num_timesteps)), desc = 'sampling loop time step', total = self.num_timesteps):
+    #         self_cond = x_start if self.self_condition else None
+    #         img, x_start = self.p_sample(img, t, self_cond)
+    #         imgs.append(img)
+    #         starts.append(x_start)
+            
+    #     ret = img,starts if not return_all_timesteps else torch.stack(imgs, dim = 1)
+
+    #     ret = self.unnormalize(ret)
+    #     return ret
 
     @torch.no_grad()
     def ddim_sample(self, shape, return_all_timesteps = False):
@@ -729,10 +755,15 @@ class GaussianDiffusion(nn.Module):
         return ret
 
     @torch.no_grad()
-    def sample(self, batch_size = 16, return_all_timesteps = False):
+    def sample(self, batch_size = 16, return_all_timesteps = False, input_image = None):
         image_size, channels = self.image_size, self.channels
-        sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
-        return sample_fn((batch_size, channels, image_size, image_size), return_all_timesteps = return_all_timesteps)
+        # sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
+        if input_image is None:
+            return self.p_sample_loop((batch_size, channels, image_size, image_size), return_all_timesteps = return_all_timesteps)
+        else:
+            return self.p_sample_loop_from_starting_img(input_image, return_all_timesteps = return_all_timesteps)
+        # sample_fn = self.p_sample_loop if input_image is None else p_sample
+        # return sample_fn((batch_size, channels, image_size, image_size), return_all_timesteps = return_all_timesteps)
 
     @torch.no_grad()
     def interpolate(self, x1, x2, t = None, lam = 0.5):
