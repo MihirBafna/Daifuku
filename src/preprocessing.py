@@ -49,7 +49,7 @@ class BulkHiCDataset(Dataset):
         self.num_cells_pseudobulk = config["num_cells_pseudobulk"]
         self.is_sparse = True if config["is_sparse"] == "True" else False
         self.map_size = config["train_config"]["map_size"]
-        self.normalize = config["train_config"]["normalization"]
+        self.normalize=config["train_config"]["normalization"]
         
         # Utilized when just selecting one chromosome
         self.selected_chromosome = config["selected_chrom"]
@@ -79,15 +79,16 @@ class BulkHiCDataset(Dataset):
 
         if self.normalize == "diagonal":
             contact_map = diagonal_normalize(contact_map)
-        
-        if self.normalize == "mean":
-            contact_map = contact_map/torch.mean(contact_map)
-
+            contact_map = zero_one_normalize(contact_map)
+        elif self.normalize == "-1to1":
+            contact_map = negone_to_one_normalize(contact_map)
+        elif self.normalize == "mean":
+            contact_map = contact_map/np.mean(contact_map)
+        elif self.normalize == "zscore":
+            contact_map = (contact_map - np.mean(contact_map))/np.std(contact_map)
             
         transform = Pad((0,0,self.map_size - contact_map.shape[0], self.map_size - contact_map.shape[0]))
-        contact_map = transform(torch.from_numpy(contact_map))
-        # print(contact_map.size, contact_map.dtype)
-        return contact_map
+        return transform(torch.from_numpy(contact_map).float())
  
 
 class ScHiCDataset(Dataset):
@@ -101,6 +102,8 @@ class ScHiCDataset(Dataset):
         self.num_chromosomes =  len(self.chrom_list)
         self.is_sparse = True if config["is_sparse"] == "True" else False
         self.map_size = config["train_config"]["map_size"]
+        self.normalize=config["train_config"]["normalization"]
+
         # self.chrom1_size = self.get_map_info()
         # self.pseudobulk_maps, self.chrom1_size = self.get_map_info()
 
@@ -119,8 +122,11 @@ class ScHiCDataset(Dataset):
         else:
             contact_path = f"{self.contact_map_path}/dense/chr{chrom_idx+1}_cell{str(cell_idx+1)}.npy"
 
+
         contact_map = np.load(contact_path, allow_pickle=True) # load contact maps for chromosome at index chrom_idx
         
+        # if self.normalize == "mean":
+        #     contact_map = contact_map/n[].mean(contact_map)
         if self.is_sparse:
             # return contact_map_sparse
             contact_map_sparse = spy_sparse2torch_sparse(contact_map)
@@ -134,43 +140,61 @@ class ScHiCDataset(Dataset):
         # chrom1_mapsize = 0
         # for i, chrom in enumerate(self.chrom_list):
         #     map = diagonal_normalize(np.load(f"{self.contact_map_path}/dense/{chrom}_pseudobulk.npy"))
-        #     map = torch.from_numpy(map).squeeze()
+        #     map = torch.from_numpy(map).squeeze"()
         #     if i==0:
         #         chrom1_mapsize = map.shape[0]
         #     # pseudobulk_maps.append(map)
         return np.load(f"{self.contact_map_path}/dense/chr1_pseudobulk.npy").shape[0]
+    
+    
+def num_params(model):
+   return sum(p.numel() for p in model.parameters() if p.requires_grad)
                     
 
 def diagonal_normalize(map):
     normalized_map = np.zeros(map.shape)
     for k in range(map.shape[1]):
         diag = np.diag(map, k=k)
-        diag_sum = np.sum(diag)
-        if diag_sum != 0:
-            normalized_diag = diag/diag_sum
+        diag_mean = np.mean(diag)
+        if diag_mean != 0:
+            normalized_diag = diag/diag_mean
             normalized_map += np.diagflat(normalized_diag,k=k)
 
     normalized_map = normalized_map + normalized_map.T - normalized_map * np.eye(map.shape[0])
-    return normalized_map
+    return normalized_map.astype(float)
 
 def diagonal_unnormalize(original, new):
     unnormalized_map = np.zeros(new.shape)
     for k in range(original.shape[1]):
         original_diag = np.diag(original, k=k)
         new_diag = np.diag(new, k=k)
-        original_diag_sum = np.sum(original_diag)
-        unnormalized_diag = new_diag*original_diag_sum
+        original_diag_mean = np.mean(original_diag)
+        unnormalized_diag = new_diag*original_diag_mean
         unnormalized_map += np.diagflat(unnormalized_diag,k=k)
     
     unnormalized_map = unnormalized_map + unnormalized_map.T - unnormalized_map * np.eye(new.shape[0])
     return unnormalized_map
     
+    
+def zero_one_normalize(map):
+    min = np.min(map)
+    max = np.max(map)
+    return (map-min)/(max-min)
+
+def zero_one_unnormalize(map, ogmap):
+    min = np.min(ogmap)
+    max = np.max(ogmap)
+    return map * (max-min) + min
 
 def negone_to_one_normalize(map):
     min = np.min(map)
     max = np.max(map)
     return 2 * (map-min)/(max-min) - 1
 
+def negone_to_one_unnormalize(map, oldmap):
+    min = np.min(oldmap)
+    max = np.max(oldmap)
+    return (map + 1) * (max-map)/2 + min
 
 def get_config(config_path = "./config.json"):
     c = open(config_path,"r")

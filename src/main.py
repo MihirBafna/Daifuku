@@ -62,7 +62,8 @@ def main():
                     devices=train_config["num_devices"],
                     logger=wandb_logger,
                     max_epochs=train_config["epochs"],
-                    accelerator=train_config["accelerator"]
+                    accelerator=train_config["accelerator"],
+                    # profile=args.debug
                 )
         
         trainer.fit(daifuku, train_loader, test_loader)

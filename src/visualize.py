@@ -10,3 +10,4 @@ def visualize_contact_map(map, zmax):
         margin=dict(l=0, r=0, t=0, b=0),
     )
     return fig
+

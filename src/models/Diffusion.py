@@ -689,9 +689,9 @@ class GaussianDiffusion(nn.Module):
             
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
 
-        ret = self.unnormalize(ret)
-        # return ret, self.unnormalize(torch.stack(starts,dim=1)), torch.stack(starts,dim=1)
-        return ret
+        # ret = self.unnormalize(ret)
+        return ret, self.unnormalize(ret), self.unnormalize(torch.stack(starts,dim=1)), torch.stack(starts,dim=1)
+        # return ret
     
     # def p_sample_loop_from_starting_img(self, img, return_all_timesteps = False):
     #     batch, device = img.shape[0], self.device
