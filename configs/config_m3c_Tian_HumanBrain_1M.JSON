@@ -11,14 +11,13 @@
     "pos2",
     "sth4"
   ],
-  "data_dir": "/home/rzhang/Data/scHiC_collection/HumanBrain_m3c",
-  "file_list_path": "/data/cb/mihirb14/projects/Daifuku/data/mc3_mouse_brain_small/filelist.txt",
-  "temp_dir": "/data/cb/mihirb14/projects/Daifuku/data/mc3_mouse_brain_small/contactmaps_1M/",
+  "data_dir": "/data/cb/ruochiz/scHiC/m3c_mouse_brain_small/m3c_Tian_et_al/",
+  "file_list_path": "/data/cb/mihirb14/projects/Daifuku/data/m3c_Tian_et_al/filelist.txt",
+  "temp_dir": "/data/cb/mihirb14/projects/Daifuku/data/m3c_Tian_et_al/contactmaps_1M/",
   "output_dir":"/data/cb/mihirb14/projects/Daifuku/out/",
   "higashi_embed_dir":"/data/cb/ruochiz/Higashi/Temp/FILL THIS IN HERE/",
-
   "structured": true,
-  "genome_reference_path": "/home/rzhang/Higashi/hg38.chrom.sizes.txt",
+  "genome_reference_path": "/data/cb/mihirb14/projects/Daifuku/data/m3c_Tian_et_al/hg38.chrom.sizes.txt",
   "cytoband_path": "/home/rzhang/Higashi/cytoBand_hg38.txt",
   "chrom_list": [
     "chr1",
