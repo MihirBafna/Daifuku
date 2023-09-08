@@ -8,6 +8,8 @@
     "sampling_timesteps":1000,
     "learning_rate":1e-5,
     "num_devices":6,
+    "num_workers":30,
+    "pin_memory":"false",
     "accelerator":"gpu",
     "normalization":"diagonal",
     "prediction_type":"pred_x0",

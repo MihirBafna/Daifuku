@@ -11,11 +11,11 @@
     "pos2",
     "sth4"
   ],
-  "data_dir": "/data/cb/ruochiz/scHiC/m3c_mouse_brain_small/m3c_Tian_et_al/",
+  "data_dir": "/data/cb/ruochiz/scHiC/m3c_Tian_et_al/",
   "file_list_path": "/data/cb/mihirb14/projects/Daifuku/data/m3c_Tian_et_al/filelist.txt",
   "temp_dir": "/data/cb/mihirb14/projects/Daifuku/data/m3c_Tian_et_al/contactmaps_1M/",
   "output_dir":"/data/cb/mihirb14/projects/Daifuku/out/",
-  "higashi_embed_dir":"/data/cb/ruochiz/Higashi/Temp/FILL THIS IN HERE/",
+  "higashi_embed_dir":"None",
   "structured": true,
   "genome_reference_path": "/data/cb/mihirb14/projects/Daifuku/data/m3c_Tian_et_al/hg38.chrom.sizes.txt",
   "cytoband_path": "/home/rzhang/Higashi/cytoBand_hg38.txt",
@@ -89,5 +89,7 @@
   "batch_id": "Region",
   "blacklist": "/home/rzhang/Higashi/hg38-blacklist.v2.bed",
   "selected_chrom":"chr10",
-  "num_cells_pseudobulk":50
+  "num_cells_pseudobulk":50,
+  "is_sparse":"False"
+
 }
