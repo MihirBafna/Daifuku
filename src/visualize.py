@@ -5,7 +5,7 @@ import ipywidgets as widgets
 
 
 def visualize_contact_map(map, zmax, title=""):
-    fig = px.imshow(map.squeeze(),zmax=zmax,color_continuous_scale="darkmint", width=500)
+    fig = px.imshow(map.squeeze(),zmax=zmax,color_continuous_scale="teal", width=500)
 
     fig.update_layout(
         margin=dict(l=0, r=0, t=50, b=0),
