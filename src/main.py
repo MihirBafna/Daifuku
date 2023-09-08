@@ -17,6 +17,7 @@ def parse_args():
     parser.add_argument('-s', '--studyname', type=str, default="default", help="Name to be used for saved dataloaders, models, and visualizations (for organization)")
     parser.add_argument('-c', '--config', type=str, default="./config.json", help="Path to configuration file")
     parser.add_argument('-t', '--train_config', type=str, default="./config.json", help="Path to training configuration file")
+    parser.add_argument('--checkpoint', type=str, default="None", help="Path to model checkpoint")
     parser.add_argument('--debug', action="store_true", help="For debugging purposes only")
     return parser.parse_args()
 
@@ -25,7 +26,6 @@ def main():
     args = parse_args()
     config = pre.get_config(args.config)
     train_config = pre.get_config(args.train_config)
-
     config["train_config"] = train_config
     
     preprocess_output_path = os.path.join(config["output_dir"], "preprocessed")
@@ -42,10 +42,12 @@ def main():
         
         train_loader, test_loader = pre.construct_dataloaders(config=config)
         
-        torch.save(train_loader, os.path.join(preprocess_output_path,f'train_dataloader_{args.studyname}.pth'))
-        torch.save(test_loader, os.path.join(preprocess_output_path,f'test_dataloader_{args.studyname}.pth'))
+        if train_config["loading"] != "all_at_once":
+            torch.save(train_loader, os.path.join(preprocess_output_path,f'train_dataloader_{args.studyname}.pth'))
+            torch.save(test_loader, os.path.join(preprocess_output_path,f'test_dataloader_{args.studyname}.pth'))
         
-        
+        print("\n#------------------------------ Done ----------------------------#\n")
+
     if "train" in args.mode:
         print("\n#-------------------------------- Training -------------------------------#\n")
         
@@ -55,7 +57,9 @@ def main():
             train_loader = torch.load(os.path.join(preprocess_output_path,f'train_dataloader_{args.studyname}.pth'))
             test_loader = torch.load(os.path.join(preprocess_output_path,f'test_dataloader_{args.studyname}.pth'))
             
+
         daifuku = ld.LightningDiffusion(train_config=train_config)
+        
         
         wandb_logger = WandbLogger(project="Daifuku")
         trainer = Trainer(
@@ -66,29 +70,15 @@ def main():
                     # profile=args.debug
                 )
         
-        trainer.fit(daifuku, train_loader, test_loader)
+        if os.path.exists(args.checkpoint):
+            print("Loading from checkpoint ...")
+            trainer.fit(daifuku, train_loader, test_loader, ckpt_path=args.checkpoint)
+        else:
+            trainer.fit(daifuku, train_loader, test_loader)
+
         trainer.save_checkpoint(os.path.join(training_output_path,f'daifuku_{args.studyname}_{train_config["epochs"]}epochs.ckpt'))
+        print("\n#------------------------------ Done ----------------------------#\n")
 
-
-        # from torch.optim import Adam
-        # import wandb
-        # model = sd.SimpleUnet()
-        # device = "cuda" if torch.cuda.is_available() else "cpu"
-        # model.to(device)
-        # optimizer = Adam(model.parameters(), lr=0.001)
-        # epochs = 100 # Try more!
-        # T = 100
-
-        # for epoch in range(epochs):
-        #     for step, batch in enumerate(train_loader):
-        #         print(batch.shape)
-        #         optimizer.zero_grad()
-
-        #         t = torch.randint(0, T, (train_config["batch_size"],), device=device).long()
-        #         loss = sd.get_loss(model, batch, t, device=device)
-        #         loss.backward()
-        #         optimizer.step()
-                
 
 
 if __name__ == "__main__":

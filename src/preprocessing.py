@@ -50,9 +50,14 @@ class BulkHiCDataset(Dataset):
         self.is_sparse = True if config["is_sparse"] == "True" else False
         self.map_size = config["train_config"]["map_size"]
         self.normalize=config["train_config"]["normalization"]
+        self.loading_scheme =  config["train_config"]["loading"]
         
         # Utilized when just selecting one chromosome
         self.selected_chromosome = config["selected_chrom"]
+        
+        
+        if  self.loading_scheme== "all_at_once":
+            self.contact_maps = np.load(self.contact_map_path+"/bulk/aggregated/"+self.selected_chromosome+".npy")
 
 
     def __len__(self):
@@ -75,7 +80,10 @@ class BulkHiCDataset(Dataset):
             chrom_idx = int(self.selected_chromosome.split("chr")[1]) - 1
             cell_idx = idx
             
-        contact_map = np.load(self.contact_map_path+f"/bulk/chr{chrom_idx+1}_cell{str(cell_idx+1)}_pseudobulk.npy", allow_pickle=True) # load contact maps for chromosome at index chrom_idx
+        if  self.loading_scheme == "all_at_once":
+            contact_map = self.contact_maps[idx]
+        else:
+            contact_map = np.load(self.contact_map_path+f"/bulk/chr{chrom_idx+1}_cell{str(cell_idx+1)}_pseudobulk.npy", allow_pickle=True) # load contact maps for chromosome at index chrom_idx
 
         if self.normalize == "diagonal":
             contact_map = diagonal_normalize(contact_map)
@@ -89,6 +97,60 @@ class BulkHiCDataset(Dataset):
             
         transform = Pad((0,0,self.map_size - contact_map.shape[0], self.map_size - contact_map.shape[0]))
         return transform(torch.from_numpy(contact_map).float())
+    
+    
+# class BulkHiCDataset(Dataset):
+#     def __init__(self, config):
+#         self.contact_map_path = config["temp_dir"]
+#         self.dataset_path = config["data_dir"]
+#         self.file_list_path = config["file_list_path"]
+#         self.dataset_info = pd.DataFrame(pickle.load(open(self.dataset_path+"/label_info.pickle","rb")))
+#         self.chrom_list = config['chrom_list']
+#         self.num_cells =  len(self.dataset_info)
+#         self.num_chromosomes =  len(self.chrom_list)
+#         self.num_cells_pseudobulk = config["num_cells_pseudobulk"]
+#         self.is_sparse = True if config["is_sparse"] == "True" else False
+#         self.map_size = config["train_config"]["map_size"]
+#         self.normalize=config["train_config"]["normalization"]
+        
+#         # Utilized when just selecting one chromosome
+#         self.selected_chromosome = config["selected_chrom"]
+
+
+#     def __len__(self):
+        
+#         if self.selected_chromosome != "all":
+#             return len(list(Path(self.contact_map_path+"/bulk/").glob(f"*{self.selected_chromosome}*")))
+#         else:
+#            return len(os.listdir(self.contact_map_path+"/bulk/"))
+    
+    
+#     def __getitem__(self, idx):
+#         ''' 
+#             chrom_idx \in [0,num_chromosomes - 1]
+#             cell_idx  \in [0, num_cells - 1]
+#         '''
+#         if self.selected_chromosome == "all":
+#             chrom_idx = idx // self.num_cells
+#             cell_idx = idx - chrom_idx * self.num_cells
+#         else:
+#             chrom_idx = int(self.selected_chromosome.split("chr")[1]) - 1
+#             cell_idx = idx
+            
+#         contact_map = np.load(self.contact_map_path+f"/bulk/chr{chrom_idx+1}_cell{str(cell_idx+1)}_pseudobulk.npy", allow_pickle=True) # load contact maps for chromosome at index chrom_idx
+
+#         if self.normalize == "diagonal":
+#             contact_map = diagonal_normalize(contact_map)
+#             contact_map = zero_one_normalize(contact_map)
+#         elif self.normalize == "-1to1":
+#             contact_map = negone_to_one_normalize(contact_map)
+#         elif self.normalize == "mean":
+#             contact_map = contact_map/np.mean(contact_map)
+#         elif self.normalize == "zscore":
+#             contact_map = (contact_map - np.mean(contact_map))/np.std(contact_map)
+            
+#         transform = Pad((0,0,self.map_size - contact_map.shape[0], self.map_size - contact_map.shape[0]))
+#         return transform(torch.from_numpy(contact_map).float())
  
 
 class ScHiCDataset(Dataset):
@@ -420,24 +482,53 @@ def get_knn(x, k):
 
 
 def generate_pseudobulk(config):
-    higashi_embed_dir = config["higashi_embed_dir"]
     num_cells_pseudobulk = config["num_cells_pseudobulk"]
     contact_map_path = config["temp_dir"]
     chrom_list = config['chrom_list']
-    higashi_embeddings = np.load(os.path.join(higashi_embed_dir,"embedding.npy"), allow_pickle=True)
-    indices = get_knn(higashi_embeddings, k=num_cells_pseudobulk)
+    data_info = pd.DataFrame(np.load(config["data_dir"]+"label_info.pickle", allow_pickle=True), index=None)
+
     
     unpack_path = os.path.join(contact_map_path,"bulk")
     print("Destination: "+unpack_path)
     if not os.path.exists(unpack_path):
         os.mkdir(unpack_path)
         
-    for chrom in tqdm(chrom_list, desc="Generating pseudobulk contact maps"):
-        chrom_contact_maps = np.load(f"{contact_map_path}/raw/{chrom}_sparse_adj.npy", allow_pickle=True) # load contact maps for chromosome at index chrom_idx
-        chrom_contact_maps = chrom_contact_maps[indices]
-        for i, neighbors in enumerate(chrom_contact_maps):
-            pseudobulk_map = np.mean(np.array([sparse_map.todense() for sparse_map in neighbors]), axis=0)
-            map_path = os.path.join(unpack_path, chrom+"_cell"+str(i+1)+"_pseudobulk.npy")
+        
+    higashi_embed_dir = config["higashi_embed_dir"]
+    
+    if os.path.exists(higashi_embed_dir):
+
+        higashi_embeddings = np.load(os.path.join(higashi_embed_dir,"embedding.npy"), allow_pickle=True)
+        indices = get_knn(higashi_embeddings, k=num_cells_pseudobulk)
+
+        for chrom in tqdm(chrom_list, desc="Generating pseudobulk contact maps"):
+            chrom_contact_maps = np.load(f"{contact_map_path}/raw/{chrom}_sparse_adj.npy", allow_pickle=True) # load contact maps for chromosome at index chrom_idx
+            chrom_contact_maps = chrom_contact_maps[indices]
+            for i, neighbors in enumerate(chrom_contact_maps):
+                pseudobulk_map = np.mean(np.array([sparse_map.todense() for sparse_map in neighbors]), axis=0)
+                map_path = os.path.join(unpack_path, chrom+"_cell"+str(i+1)+"_pseudobulk.npy")
+                np.save(map_path,pseudobulk_map)
+    else:
+
+        chrom_contact_maps = np.load(f"{contact_map_path}/raw/chr10_sparse_adj.npy", allow_pickle=True) # load contact maps for chromosome at index chrom_idx
+        for cell_i, row in  tqdm(data_info.iterrows(), desc=f"Generating pseudobulk contact maps", total=data_info.shape[0]):
+            cell_i_subtype = row["SubType"]
+            cell_i_donor_region = row["Donor_Region"]
+            cell_i_candidate_neighbors_region_indices = set(data_info.index[(data_info['Donor_Region'] == cell_i_donor_region)])
+            cell_i_candidate_neighbors_subtype_indices = set(data_info.index[(data_info['SubType'] == cell_i_subtype)])
+            intersection = np.array(list(cell_i_candidate_neighbors_region_indices.intersection(cell_i_candidate_neighbors_subtype_indices)))
+            if len(intersection) < config["num_cells_pseudobulk"]:
+                remaining_sampled_from_subtype = np.random.choice(np.array(list(cell_i_candidate_neighbors_region_indices)), config["num_cells_pseudobulk"] - len(intersection), replace=False)
+                cell_i_neighbor_indices = np.concatenate([intersection,remaining_sampled_from_subtype])
+            else:
+                sampled_from_intersection = np.random.choice(intersection, config["num_cells_pseudobulk"], replace=False)
+                cell_i_neighbor_indices = sampled_from_intersection
+
+            chrom_contact_maps_selected = chrom_contact_maps[cell_i_neighbor_indices]
+            assert len(chrom_contact_maps_selected) == config["num_cells_pseudobulk"]
+            
+            pseudobulk_map = np.mean(np.array([sparse_map.todense() for sparse_map in chrom_contact_maps_selected]), axis=0)
+            map_path = os.path.join(unpack_path, "chr10_cell"+str(cell_i+1)+"_pseudobulk.npy")
             np.save(map_path,pseudobulk_map)
 
 
@@ -445,6 +536,7 @@ def construct_dataloaders(config):
     
     batch_size = config["train_config"]["batch_size"]
     train_size = config["train_config"]["train_size"]
+    pin_memory = True if config["train_config"]["pin_memory"] == "true" else False,
     type = config["train_config"]["type"]
     if type == "sc":
         hic_dataset = ScHiCDataset(config)
@@ -456,14 +548,14 @@ def construct_dataloaders(config):
     train_size = int(train_size * len(hic_dataset))
     test_size = len(hic_dataset) - train_size
     train_dataset, test_dataset = random_split(hic_dataset, [train_size,test_size])
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size)
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, num_workers=config["train_config"]["num_workers"], pin_memory=pin_memory)
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, num_workers=config["train_config"]["num_workers"], pin_memory=pin_memory)
     return train_dataloader, test_dataloader
 
 
 def higashi_preprocess(config):
-    create_dir(config)
-    generate_chrom_start_end(config)
-    extract_table(config)
-    unpack_contactmaps(config)
+    # create_dir(config)
+    # generate_chrom_start_end(config)
+    # extract_table(config)
+    # unpack_contactmaps(config)
     generate_pseudobulk(config)
